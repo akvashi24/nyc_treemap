@@ -80,6 +80,12 @@ def format_name(common_name):
     return " ".join(capitals)
 
 
+def generate_image_html(relative_path):
+    file_name = os.path.basename(relative_path)
+    html = f'<img src="{file_name}">'
+    return html
+
+
 def process_file(input_filename, output_filename):
     logging.info(f"Processing input file: {input_filename}")
     total_lines = 0
@@ -93,9 +99,9 @@ def process_file(input_filename, output_filename):
         writer = csv.writer(csvfile)
         writer.writerow(
             [
-                "commonName",
-                "imageFilePath",
-                "url",
+                "Species Name",
+                "Leaf Image",
+                "URL",
             ]
         )
 
@@ -113,9 +119,10 @@ def process_file(input_filename, output_filename):
                 formatted_name = format_name(common_name)
                 logging.info(f"Parsing data for Species {species_id}: {formatted_name}")
                 image_path = download_image(photo_id)
+                image_html = generate_image_html(image_path)
                 url = f"https://tree-map.nycgovparks.org/tree-map/species/{species_id}"
                 if image_path:
-                    writer.writerow([formatted_name, image_path, url])
+                    writer.writerow([formatted_name, image_html, url])
                     trees_written += 1
                 else:
                     fetched_but_not_written += 1
