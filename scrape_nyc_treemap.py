@@ -3,17 +3,47 @@ import sys
 import csv
 import os
 import logging
+import argparse
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 
+GOOGLE_CUSTOM_SEARCH_KEY = os.getenv("GOOGLE_CUSTOM_SEARCH_KEY")
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
+
+if not GOOGLE_CUSTOM_SEARCH_KEY or not GOOGLE_CSE_ID:
+    raise ValueError(
+        "Missing GOOGLE_CUSTOM_SEARCH_KEY or GOOGLE_CSE_ID environment variables"
+    )
+
+
+def google_image_search(query):
+    url = "https://www.googleapis.com/customsearch/v1"
+
+    # Parameters for image search
+    params = {
+        "key": GOOGLE_CUSTOM_SEARCH_KEY,
+        "cx": GOOGLE_CSE_ID,
+        "q": query,
+        "searchType": "image",  # Important: image search
+        "num": 1,  # Only get the top result
+    }
+
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    if "items" in data and len(data["items"]) > 0:
+        top_image_link = data["items"][0].get("link")
+        return top_image_link
+    else:
+        logging.warning("Image link not found")
+
 
 def fetch_tree_data(tree_id):
-    """Query NYC Tree Map GraphQL API for data about a tree."""
     url = "https://treemap-api1.nycgovparks.org/nmdapi/graphql"
     headers = {"Content-Type": "application/json"}
     payload = {
@@ -46,14 +76,21 @@ def fetch_tree_data(tree_id):
         return None
 
 
-def download_image(photo_id, download_dir="images"):
-    """Download the image from NYC Parks Cloudinary and return local filepath."""
-    if not photo_id:
+def make_treemap_image_url(photo_id):
+    return (
+        f"https://res.cloudinary.com/nycparks/image/upload/c_scale,w_auto/c_scale,w_auto/dpr_1.0/f_auto/q_auto:best/d_tree-map:species:defaulttmspecies.jpg/v1/tree-map/species/{photo_id}_tmspecies.png?_a=AJCihWI0"
+        if photo_id
+        else ""
+    )
+
+
+def download_image_from_url(url, download_dir="images"):
+    if not url:
         return ""
 
     os.makedirs(download_dir, exist_ok=True)
-    url = f"https://res.cloudinary.com/nycparks/image/upload/c_scale,w_auto/c_scale,w_auto/dpr_1.0/f_auto/q_auto:best/d_tree-map:species:defaulttmspecies.jpg/v1/tree-map/species/{photo_id}_tmspecies.png?_a=AJCihWI0"
-    filepath = os.path.join(download_dir, f"{photo_id}_tmspecies.png")
+    file_name = os.path.basename(url.split("?")[0])
+    filepath = os.path.join(download_dir, file_name)
 
     try:
         response = requests.get(url, stream=True)
@@ -61,28 +98,30 @@ def download_image(photo_id, download_dir="images"):
             with open(filepath, "wb") as out_file:
                 for chunk in response.iter_content(chunk_size=8192):
                     out_file.write(chunk)
-            logging.debug(f"Image downloaded for photo ID {photo_id}")
+            logging.debug(f"Image downloaded from URL {url}")
             return filepath
         else:
             logging.error(
-                f"Image download failed for photo ID {photo_id} with status code {response.status_code}"
+                f"Image download failed from URL {url} with status code {response.status_code}"
             )
     except Exception as exception:
-        logging.exception(f"Error downloading image for {photo_id}: {exception}")
+        logging.exception(f"Error downloading image from URL {url}: {exception}")
 
     return ""
 
 
 def format_name(common_name):
-    """Format the name of the NYC Parks Tree to use capital case"""
     words_in_name = common_name.split(" ")
     capitals = [word.capitalize() for word in words_in_name]
     return " ".join(capitals)
 
 
-def generate_image_html(relative_path):
-    file_name = os.path.basename(relative_path)
-    html = f'<img src="{file_name}">'
+def generate_image_html(image_paths):
+    html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;">'
+    for path in image_paths:
+        if path:
+            html += f'<img src="{path}" style="width: 100%; height: auto;">'
+    html += "</div>"
     return html
 
 
@@ -100,33 +139,57 @@ def process_file(input_filename, output_filename):
         writer.writerow(
             [
                 "Species Name",
-                "Leaf Image",
+                "Image HTML",
                 "URL",
             ]
         )
-
         for row in reader:
+            logging.info(f"Logging tree #{total_lines}")
             total_lines += 1
             species_id = row.get("speciesId")
             if not species_id:
                 logging.warning("Missing species_id in row, skipping.")
                 continue
+
             data = fetch_tree_data(species_id)
             if data:
                 species = data.get("data", {}).get("treeSpeciesById", {})
                 common_name = species.get("commonName", "")
-                photo_id = species.get("speciesPhotoId", "")
                 formatted_name = format_name(common_name)
-                logging.info(f"Parsing data for Species {species_id}: {formatted_name}")
-                image_path = download_image(photo_id)
-                image_html = generate_image_html(image_path)
-                url = f"https://tree-map.nycgovparks.org/tree-map/species/{species_id}"
-                if image_path:
-                    writer.writerow([formatted_name, image_html, url])
-                    trees_written += 1
-                else:
-                    fetched_but_not_written += 1
-                    logging.warning(f"No image found for Species {species_id}")
+                photo_id = species.get("speciesPhotoId")
+                treemap_leaf_url = make_treemap_image_url(photo_id)
+
+                google_leaf_url = google_image_search(f"{formatted_name} leaf")
+                bark_url = google_image_search(f"{formatted_name} bark")
+                whole_tree_url = google_image_search(f"{formatted_name} whole tree")
+
+                treemap_leaf_img_path = download_image_from_url(treemap_leaf_url)
+                google_leaf_img_path = download_image_from_url(google_leaf_url)
+                bark_img_path = download_image_from_url(bark_url)
+                whole_tree_img_path = download_image_from_url(whole_tree_url)
+
+                logging.debug(
+                    f"{formatted_name} treemap leaf path: {treemap_leaf_img_path}"
+                )
+                logging.debug(
+                    f"{formatted_name} google leaf path: {google_leaf_img_path}"
+                )
+                logging.debug(f"{formatted_name} bark path: {bark_img_path}")
+                logging.debug(
+                    f"{formatted_name} whole tree path: {whole_tree_img_path}"
+                )
+
+                html = generate_image_html(
+                    [
+                        treemap_leaf_img_path,
+                        google_leaf_img_path,
+                        bark_img_path,
+                        whole_tree_img_path,
+                    ]
+                )
+
+                writer.writerow([formatted_name, html])
+                trees_written += 1
             else:
                 logging.warning(f"No data returned for Species {species_id}")
 
@@ -137,6 +200,21 @@ def process_file(input_filename, output_filename):
 
 
 if __name__ == "__main__":
-    input_file = sys.argv[1] if len(sys.argv) > 1 else "./species_ids.csv"
-    output_file = sys.argv[2] if len(sys.argv) > 2 else "./tree_data.csv"
-    process_file(input_file, output_file)
+    parser = argparse.ArgumentParser(description="Process NYC tree images.")
+    parser.add_argument(
+        "-i",
+        "--input",
+        type=str,
+        default="./species_ids.csv",
+        help="Input CSV file containing species IDs",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default="./tree_data.csv",
+        help="Output CSV file for tree data",
+    )
+    args = parser.parse_args()
+
+    process_file(args.input, args.output)
